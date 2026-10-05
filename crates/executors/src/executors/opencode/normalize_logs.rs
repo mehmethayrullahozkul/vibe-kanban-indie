@@ -723,7 +723,20 @@ impl LogState {
         // `permission` is an approval category (e.g. "edit", "bash"), not necessarily the tool
         // name ("write" vs "edit"). Only fall back to it when we haven't seen a tool name yet.
         if tool_state.tool_name() == "tool" {
-            tool_state.set_tool_name(event.permission.clone());
+            // Subagent tool calls are never seen as tool parts, so include the requested
+            // patterns (e.g. the external directory) to make the entry self-explanatory.
+            let patterns: Vec<&str> = event
+                .patterns
+                .iter()
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .collect();
+            let name = if patterns.is_empty() {
+                event.permission.clone()
+            } else {
+                format!("{}: {}", event.permission, patterns.join(", "))
+            };
+            tool_state.set_tool_name(name);
         }
 
         // `permission.asked` can carry richer metadata than the initial tool part updates (e.g.
