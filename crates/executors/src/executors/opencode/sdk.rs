@@ -1305,6 +1305,26 @@ async fn process_event_stream(
             continue;
         };
 
+        if matches!(
+            event_type,
+            "session.created"
+                | "session.updated"
+                | "session.idle"
+                | "session.error"
+                | "permission.asked"
+                | "question.asked"
+        ) {
+            tracing::debug!(
+                target: "opencode_events",
+                "{event_type} session={:?} parent={:?} root={}",
+                data.pointer("/properties/sessionID")
+                    .or_else(|| data.pointer("/properties/info/id"))
+                    .and_then(Value::as_str),
+                data.pointer("/properties/info/parentID").and_then(Value::as_str),
+                ctx.session_id
+            );
+        }
+
         track_child_session(event_type, &data, ctx.session_id, ctx.child_sessions);
 
         if !event_matches_session(event_type, &data, ctx.session_id) {
