@@ -1314,13 +1314,16 @@ async fn process_event_stream(
                 | "permission.asked"
                 | "question.asked"
         ) {
+            let event_session = data
+                .pointer("/properties/sessionID")
+                .or_else(|| data.pointer("/properties/info/id"))
+                .and_then(|v| v.as_str());
+            let event_parent = data
+                .pointer("/properties/info/parentID")
+                .and_then(|v| v.as_str());
             tracing::debug!(
                 target: "opencode_events",
-                "{event_type} session={:?} parent={:?} root={}",
-                data.pointer("/properties/sessionID")
-                    .or_else(|| data.pointer("/properties/info/id"))
-                    .and_then(Value::as_str),
-                data.pointer("/properties/info/parentID").and_then(Value::as_str),
+                "{event_type} session={event_session:?} parent={event_parent:?} root={}",
                 ctx.session_id
             );
         }
