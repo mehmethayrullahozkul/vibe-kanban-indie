@@ -1140,6 +1140,7 @@ pub(super) async fn spawn_event_listener(
     } = config;
 
     let mut seen_permissions: HashSet<String> = HashSet::new();
+    let mut child_sessions: HashSet<String> = HashSet::new();
     let mut last_event_id: Option<String> = None;
     let mut base_retry_delay = Duration::from_millis(3000);
     let mut attempt: u32 = 0;
@@ -1180,6 +1181,7 @@ pub(super) async fn spawn_event_listener(
         let outcome = process_event_stream(
             EventStreamContext {
                 seen_permissions: &mut seen_permissions,
+                child_sessions: &mut child_sessions,
                 client: &client,
                 base_url: &base_url,
                 directory: &directory,
@@ -1237,6 +1239,7 @@ enum EventStreamOutcome {
 
 pub(super) struct EventStreamContext<'a> {
     seen_permissions: &'a mut HashSet<String>,
+    child_sessions: &'a mut HashSet<String>,
     pub client: &'a reqwest::Client,
     pub base_url: &'a str,
     pub directory: &'a str,
@@ -1299,8 +1302,19 @@ async fn process_event_stream(
             continue;
         };
 
+        track_child_session(event_type, &data, ctx.session_id, ctx.child_sessions);
+
         if !event_matches_session(event_type, &data, ctx.session_id) {
-            continue;
+            // Subagents (the `task` tool) run in child sessions. Their tool calls still
+            // need approval, otherwise the child blocks forever and the parent hangs.
+            let is_child_prompt = matches!(event_type, "permission.asked" | "question.asked")
+                && data
+                    .pointer("/properties/sessionID")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| ctx.child_sessions.contains(id));
+            if !is_child_prompt {
+                continue;
+            }
         }
 
         let _ = ctx
@@ -1627,6 +1641,31 @@ async fn process_event_stream(
     Ok(EventStreamOutcome::Disconnected)
 }
 
+/// Records sessions spawned (directly or transitively) from `root_session_id`,
+/// learned from `session.created` / `session.updated` events carrying a `parentID`.
+fn track_child_session(
+    event_type: &str,
+    event: &Value,
+    root_session_id: &str,
+    child_sessions: &mut HashSet<String>,
+) {
+    if !matches!(event_type, "session.created" | "session.updated") {
+        return;
+    }
+    let Some(id) = event.pointer("/properties/info/id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(parent) = event
+        .pointer("/properties/info/parentID")
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    if parent == root_session_id || child_sessions.contains(parent) {
+        child_sessions.insert(id.to_string());
+    }
+}
+
 fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> bool {
     let extracted = match event_type {
         "message.updated" => event
@@ -1786,4 +1825,51 @@ fn answers_to_opencode_format(questions: &[Value], answers: &[QuestionAnswer]) -
                 })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn created(id: &str, parent: Option<&str>) -> Value {
+        let mut info = serde_json::json!({ "id": id });
+        if let Some(parent) = parent {
+            info["parentID"] = Value::String(parent.to_string());
+        }
+        serde_json::json!({ "type": "session.created", "properties": { "info": info } })
+    }
+
+    #[test]
+    fn tracks_nested_child_sessions_only() {
+        let mut children = HashSet::new();
+        track_child_session(
+            "session.created",
+            &created("c1", Some("root")),
+            "root",
+            &mut children,
+        );
+        track_child_session(
+            "session.created",
+            &created("c2", Some("c1")),
+            "root",
+            &mut children,
+        );
+        track_child_session(
+            "session.created",
+            &created("x", Some("other")),
+            "root",
+            &mut children,
+        );
+        track_child_session(
+            "session.created",
+            &created("y", None),
+            "root",
+            &mut children,
+        );
+
+        assert!(children.contains("c1"));
+        assert!(children.contains("c2"));
+        assert!(!children.contains("x"));
+        assert!(!children.contains("y"));
+    }
 }
