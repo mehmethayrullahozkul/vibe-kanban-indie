@@ -1082,6 +1082,10 @@ pub(super) async fn connect_event_stream(
     let mut req = client
         .get(format!("{base_url}/event"))
         .header(reqwest::header::ACCEPT, "text/event-stream")
+        // The client-wide timeout is a *total* request timeout that also covers the streaming
+        // body, which would cut the event stream every few minutes and drop events
+        // (permission prompts, idle) emitted during the reconnect gap.
+        .timeout(OPENCODE_PROMPT_TIMEOUT)
         .query(&[("directory", directory)]);
 
     if let Some(last_event_id) = last_event_id {
@@ -1202,6 +1206,9 @@ pub(super) async fn spawn_event_listener(
         )
         .await;
 
+        if let Err(err) = &outcome {
+            tracing::debug!(target: "opencode_events", "event stream ended with error: {err}");
+        }
         match outcome {
             Ok(EventStreamOutcome::Idle) => {
                 // Keep listening - there may be more prompts (e.g., commit reminder)
