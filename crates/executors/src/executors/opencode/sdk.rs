@@ -1507,6 +1507,18 @@ async fn process_event_stream(
                     .and_then(Value::as_str)
                     .unwrap_or("tool")
                     .to_string();
+                // Include the requested patterns (e.g. the external directory) so the
+                // approval is not just a bare permission name.
+                let patterns: Vec<&str> = data
+                    .pointer("/properties/patterns")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let permission = if patterns.is_empty() {
+                    permission
+                } else {
+                    format!("{permission}: {}", patterns.join(", "))
+                };
 
                 let approvals = ctx.approvals.clone();
                 let client = ctx.client.clone();
