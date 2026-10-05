@@ -1141,6 +1141,7 @@ pub(super) async fn spawn_event_listener(
 
     let mut seen_permissions: HashSet<String> = HashSet::new();
     let mut child_sessions: HashSet<String> = HashSet::new();
+    let mut unrelated_sessions: HashSet<String> = HashSet::new();
     let mut last_event_id: Option<String> = None;
     let mut base_retry_delay = Duration::from_millis(3000);
     let mut attempt: u32 = 0;
@@ -1182,6 +1183,7 @@ pub(super) async fn spawn_event_listener(
             EventStreamContext {
                 seen_permissions: &mut seen_permissions,
                 child_sessions: &mut child_sessions,
+                unrelated_sessions: &mut unrelated_sessions,
                 client: &client,
                 base_url: &base_url,
                 directory: &directory,
@@ -1240,6 +1242,7 @@ enum EventStreamOutcome {
 pub(super) struct EventStreamContext<'a> {
     seen_permissions: &'a mut HashSet<String>,
     child_sessions: &'a mut HashSet<String>,
+    unrelated_sessions: &'a mut HashSet<String>,
     pub client: &'a reqwest::Client,
     pub base_url: &'a str,
     pub directory: &'a str,
@@ -1307,13 +1310,34 @@ async fn process_event_stream(
         if !event_matches_session(event_type, &data, ctx.session_id) {
             // Subagents (the `task` tool) run in child sessions. Their tool calls still
             // need approval, otherwise the child blocks forever and the parent hangs.
-            let is_child_prompt = matches!(event_type, "permission.asked" | "question.asked")
-                && data
-                    .pointer("/properties/sessionID")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| ctx.child_sessions.contains(id));
-            if !is_child_prompt {
+            let is_prompt = matches!(event_type, "permission.asked" | "question.asked");
+            let event_session = data
+                .pointer("/properties/sessionID")
+                .and_then(Value::as_str)
+                .filter(|_| is_prompt);
+            let Some(event_session) = event_session else {
                 continue;
+            };
+            if !ctx.child_sessions.contains(event_session) {
+                // The child may predate this listener (e.g. a resumed subagent session),
+                // so its `session.created` event was never seen. Ask the server.
+                if ctx.unrelated_sessions.contains(event_session) {
+                    continue;
+                }
+                if session_descends_from(
+                    ctx.client,
+                    ctx.base_url,
+                    ctx.directory,
+                    event_session,
+                    ctx.session_id,
+                )
+                .await
+                {
+                    ctx.child_sessions.insert(event_session.to_string());
+                } else {
+                    ctx.unrelated_sessions.insert(event_session.to_string());
+                    continue;
+                }
             }
         }
 
@@ -1651,6 +1675,42 @@ async fn process_event_stream(
     }
 
     Ok(EventStreamOutcome::Disconnected)
+}
+
+/// Walks the `parentID` chain of `session_id` on the server and reports whether it
+/// reaches `root_session_id`.
+async fn session_descends_from(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+    session_id: &str,
+    root_session_id: &str,
+) -> bool {
+    let mut current = session_id.to_string();
+    for _ in 0..8 {
+        let Ok(resp) = client
+            .get(format!("{base_url}/session/{current}"))
+            .query(&[("directory", directory)])
+            .send()
+            .await
+        else {
+            return false;
+        };
+        if !resp.status().is_success() {
+            return false;
+        }
+        let Ok(info) = resp.json::<Value>().await else {
+            return false;
+        };
+        let Some(parent) = info.get("parentID").and_then(Value::as_str) else {
+            return false;
+        };
+        if parent == root_session_id {
+            return true;
+        }
+        current = parent.to_string();
+    }
+    false
 }
 
 /// Records sessions spawned (directly or transitively) from `root_session_id`,
