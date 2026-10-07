@@ -14,7 +14,6 @@ import {
   extractManualLines,
   type PipelineStage,
 } from '@/shared/lib/pipeline/cardPipeline';
-import { useDefaultPipelineId } from '@/shared/stores/useUiPreferencesStore';
 import {
   Select,
   SelectContent,
@@ -65,18 +64,22 @@ interface PipelineSectionProps {
   onChange: (selection: PipelineSelection) => void;
 }
 
+/** Sentinel Select value for "no pipeline" (Radix items can't be empty strings). */
+const NO_PIPELINE = '__none__';
+
 /**
  * Per-card "Pipeline" control, used both in the New Issue dialog (create
  * mode) and when editing an existing card. Single-select dropdown over the
  * file-based pipelines; the chosen pipeline's stages are listed as
  * checkboxes so the operator can tick exactly which apply, and those ticked
  * stages are composed into a `## Pipeline` block (editable in the textbox).
- * The last pipeline choice is remembered (localStorage) as the default for
- * the next issue. Because there is only ever one pipeline selected, the
+ * No pipeline is selected by default, so a new card gets no `## Pipeline`
+ * block unless the operator picks one. Because there is only ever one pipeline selected, the
  * block reflects the current ticks 1:1 — no cross-pipeline merging, and a
  * pipeline change fully replaces the block (manual edits persist only until
  * the next pipeline change; stage/executor tweaks preserve them).
  */
+
 export function PipelineSection({
   profiles,
   disabled,
@@ -85,7 +88,6 @@ export function PipelineSection({
   onChange,
 }: PipelineSectionProps) {
   const { t } = useTranslation('common');
-  const [rememberedDefaultId, setRememberedDefaultId] = useDefaultPipelineId();
   const agents = useMemo(
     () => (profiles ? Object.keys(profiles).sort() : []),
     [profiles]
@@ -109,8 +111,6 @@ export function PipelineSection({
   );
   const [text, setText] = useState(initialSelection?.block ?? '');
 
-  // Create-mode default applied once pipelines load.
-  const appliedCreateDefaultRef = useRef(hasInitialSelection);
   // Skip the very first recompose in edit mode so opening a card never
   // rewrites its existing block before interaction.
   const skipFirstRecomposeRef = useRef(hasInitialSelection);
@@ -142,27 +142,14 @@ export function PipelineSection({
     []
   );
 
-  // Fetch pipelines once. In create mode, default the dropdown to the
-  // remembered default (else 'basic', else first) and tick its default stages;
-  // the recompose effect builds the block from that selection.
+  // Fetch pipelines once. Nothing is selected by default (in create mode too):
+  // a card only gets a `## Pipeline` block when the operator picks one.
   useEffect(() => {
     let cancelled = false;
     pipelinesApi
       .list()
       .then((list) => {
-        if (cancelled) return;
-        setPipelines(list);
-        if (appliedCreateDefaultRef.current) return;
-        appliedCreateDefaultRef.current = true;
-        const remembered = rememberedDefaultId
-          ? list.find((p) => p.id === rememberedDefaultId)
-          : null;
-        const def =
-          remembered ?? list.find((p) => p.id === 'basic') ?? list[0] ?? null;
-        if (!def) return;
-        setSelectedId(def.id);
-        setEnabledIds(defaultStageIds(def));
-        fullReplaceRef.current = true;
+        if (!cancelled) setPipelines(list);
       })
       .catch(() => {
         if (!cancelled) setPipelines([]);
@@ -170,7 +157,6 @@ export function PipelineSection({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Recompose the block whenever the selection settles. A pipeline change sets
@@ -217,13 +203,17 @@ export function PipelineSection({
   const handleSelectPipeline = useCallback(
     (id: string) => {
       interactedRef.current = true;
+      fullReplaceRef.current = true;
+      if (id === NO_PIPELINE) {
+        setSelectedId(null);
+        setEnabledIds(new Set());
+        return;
+      }
       setSelectedId(id);
-      setRememberedDefaultId(id);
       const p = pipelines.find((x) => x.id === id) ?? null;
       setEnabledIds(defaultStageIds(p));
-      fullReplaceRef.current = true;
     },
-    [pipelines, defaultStageIds, setRememberedDefaultId]
+    [pipelines, defaultStageIds]
   );
 
   const handleToggleStep = useCallback((id: string) => {
@@ -270,7 +260,7 @@ export function PipelineSection({
               {t('cardPipeline.pipelineLabel')}
             </label>
             <Select
-              value={selectedId ?? ''}
+              value={selectedId ?? NO_PIPELINE}
               onValueChange={handleSelectPipeline}
               disabled={disabled || pipelines.length === 0}
             >
@@ -280,10 +270,11 @@ export function PipelineSection({
                 />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value={NO_PIPELINE}>
+                  {t('cardPipeline.noPipeline')}
+                </SelectItem>
                 {selectedId && !selectedPipeline ? (
-                  <SelectItem value={selectedId}>
-                    {t('cardPipeline.noPipeline')}
-                  </SelectItem>
+                  <SelectItem value={selectedId}>{selectedId}</SelectItem>
                 ) : null}
                 {pipelines.map((p) => (
                   <SelectItem key={p.id} value={p.id}>

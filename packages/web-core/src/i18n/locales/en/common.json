@@ -466,7 +466,7 @@
   },
   "cardPipeline": {
     "title": "Pipeline",
-    "description": "Pick the pipeline this card should go through. Its stages are appended to the card description for the agent to follow. Your last choice is remembered for the next issue.",
+    "description": "Pick the pipeline this card should go through. Its stages are appended to the card description for the agent to follow.  Nothing is added unless you pick one.",
     "pipelineLabel": "Pipeline",
     "pipelinePlaceholder": "Select a pipeline",
     "noPipeline": "No pipeline",
